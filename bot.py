@@ -58,9 +58,9 @@ async def init_db():
                 name         TEXT NOT NULL,
                 description  TEXT,
                 next_run     TIMESTAMPTZ NOT NULL,
-                repeat_type  TEXT NOT NULL,
+                repeat_type  TEXT NOT NULL DEFAULT 'co_tydzien',
                 remind_min   INT NOT NULL DEFAULT 30,
-                created_by   BIGINT NOT NULL,
+                created_by   BIGINT NOT NULL DEFAULT 0,
                 created_at   TIMESTAMPTZ DEFAULT NOW(),
                 reminded     BOOLEAN DEFAULT FALSE,
                 UNIQUE(guild_id, name)
@@ -78,6 +78,19 @@ async def init_db():
                 message_id  BIGINT NOT NULL
             );
         """)
+
+        # Migracje — dodaj brakujące kolumny jeśli tabela istniała wcześniej
+        migrations = [
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS reminded BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS repeat_type TEXT NOT NULL DEFAULT 'co_tydzien'",
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS next_run TIMESTAMPTZ",
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS description TEXT",
+        ]
+        for migration in migrations:
+            try:
+                await conn.execute(migration)
+            except Exception:
+                pass
     log.info("Baza danych gotowa.")
 
 
