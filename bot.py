@@ -191,13 +191,13 @@ def parse_next_run(day_str: str, hour_str: str, minute_str: str, repeat_type: st
 
     if candidate <= now:
         if repeat_type == "jednorazowe" or repeat_type == "custom_0":
-            return None, f"Wybrany czas ({candidate.strftime('%H:%M')}) już minął, a wydarzenie jest jednorazowe."
+            return None, f"Wybrany czas ({candidate.strftime('%H:%M')}) w dany dzień już minął, a wydarzenie jest jednorazowe."
         
         loop_safety = 0
         while candidate <= now:
             next_cand = next_run_after(candidate, repeat_type)
             if next_cand is None or next_cand == candidate:
-                return None, "Błąd kalkulacji interwału. Upewnij się, że czas powtarzania jest większy niż 0."
+                return None, "Błąd kalkulacji interwału. Upewnij się, że czas powtarzania jest poprawny."
             
             candidate = next_cand
             loop_safety += 1
@@ -269,64 +269,73 @@ async def update_panel(guild_id: int):
 
 # ─── Views & Modals ──────────────────────────────────────────────────────────
 
-class AddEventModal(discord.ui.Modal, title="➕ Nowe wydarzenie"):
-    event_name = discord.ui.TextInput(
-        label="Nazwa wydarzenia",
-        placeholder="np. Boss Ogień",
-        max_length=50
-    )
-    start_time = discord.ui.TextInput(
-        label="Kiedy start? (Dzień Godzina:Minuta)",
-        placeholder="np. piatek 20:00 lub * 15:30",
-        max_length=25
-    )
-    interval = discord.ui.TextInput(
-        label="Interwał: Dni Godziny Minuty (oddziel spacją)",
-        placeholder="np. 0 1 30 (co 1.5h) lub 0 0 0 (raz)",
-        max_length=20
-    )
-    remind_min = discord.ui.TextInput(
-        label="Ile minut przed przypomnieć?",
-        placeholder="np. 15",
-        max_length=5
-    )
-    description = discord.ui.TextInput(
-        label="Opis (opcjonalnie)",
-        placeholder="Krótki opis...",
-        required=False,
-        max_length=200
-    )
-
-    def __init__(self, channel_id: int):
-        super().__init__()
+class Step2Modal(discord.ui.Modal):
+    def __init__(self, day_str: str, name_val: str, desc_val: str, channel_id: int):
+        super().__init__(title="Krok 2: Czas i interwał")
+        self.day_str = day_str
+        self.name_val = name_val
+        self.desc_val = desc_val
         self.channel_id = channel_id
 
+        # 1. Godzina startu
+        self.time_input = discord.ui.TextInput(
+            label="Godzina (format GG:MM)",
+            placeholder="np. 20:00",
+            max_length=5
+        )
+        self.add_item(self.time_input)
+
+        # 2. Interwał: Minuty
+        self.int_mins = discord.ui.TextInput(
+            label="Interwał - Ile minut?",
+            placeholder="np. 0",
+            default="0",
+            max_length=3
+        )
+        self.add_item(self.int_mins)
+
+        # 3. Interwał: Godziny
+        self.int_hours = discord.ui.TextInput(
+            label="Interwał - Ile godzin?",
+            placeholder="np. 1",
+            default="0",
+            max_length=3
+        )
+        self.add_item(self.int_hours)
+
+        # 4. Interwał: Dni
+        self.int_days = discord.ui.TextInput(
+            label="Interwał - Ile dni?",
+            placeholder="np. 0",
+            default="0",
+            max_length=3
+        )
+        self.add_item(self.int_days)
+
+        # 5. Przypomnienie
+        self.remind_min = discord.ui.TextInput(
+            label="Przypomnienie (ile minut przed)",
+            placeholder="np. 15",
+            default="15",
+            max_length=5
+        )
+        self.add_item(self.remind_min)
+
     async def on_submit(self, interaction: discord.Interaction):
-        # 1. Parsowanie Czasu Startu
-        start_parts = self.start_time.value.strip().split()
-        if len(start_parts) != 2:
-            return await interaction.response.send_message("❌ Zły format czasu startu! Użyj np. `piatek 20:00`", ephemeral=True)
-        
-        day_str = start_parts[0]
-        time_parts = start_parts[1].split(':')
+        # 1. Parsowanie Godziny
+        time_parts = self.time_input.value.strip().split(':')
         if len(time_parts) != 2:
-            return await interaction.response.send_message("❌ Zły format godziny! Użyj np. `20:00` (pamiętaj o dwukropku)", ephemeral=True)
+            return await interaction.response.send_message("❌ Zły format godziny! Użyj formatu `GG:MM`, np. `20:00`.", ephemeral=True)
             
         hour_str, minute_str = time_parts[0], time_parts[1]
 
-        # 2. Parsowanie Interwału
-        int_parts = self.interval.value.strip().split()
-        if len(int_parts) == 1 and int_parts[0] == "0":
-            d, h, m = 0, 0, 0
-        elif len(int_parts) == 3:
-            try:
-                d = int(int_parts[0])
-                h = int(int_parts[1])
-                m = int(int_parts[2])
-            except ValueError:
-                return await interaction.response.send_message("❌ Interwał musi składać się z liczb.", ephemeral=True)
-        else:
-            return await interaction.response.send_message("❌ Podaj dokładnie 3 liczby dla interwału (Dni Godziny Minuty) oddzielone spacją, np. `0 1 30`", ephemeral=True)
+        # 2. Parsowanie Interwału z 3 osobnych pól
+        try:
+            m = int(self.int_mins.value.strip() or 0)
+            h = int(self.int_hours.value.strip() or 0)
+            d = int(self.int_days.value.strip() or 0)
+        except ValueError:
+            return await interaction.response.send_message("❌ Interwały muszą być liczbami.", ephemeral=True)
 
         if d < 0 or h < 0 or m < 0:
             return await interaction.response.send_message("❌ Interwał nie może być ujemny.", ephemeral=True)
@@ -341,12 +350,14 @@ class AddEventModal(discord.ui.Modal, title="➕ Nowe wydarzenie"):
         except ValueError:
              return await interaction.response.send_message("❌ Przypomnienie musi być dodatnią liczbą minut.", ephemeral=True)
 
-        # 4. Kalkulacja czasu
-        next_run, error = parse_next_run(day_str, hour_str, minute_str, repeat_type)
+        # 4. Kalkulacja czasu startu
+        next_run, error = parse_next_run(self.day_str, hour_str, minute_str, repeat_type)
         if error:
             return await interaction.response.send_message(f"❌ {error}", ephemeral=True)
 
-        name = self.event_name.value.strip()
+        name = self.name_val.strip()
+        desc = self.desc_val.strip() or None
+
         try:
             async with db.acquire() as conn:
                 await conn.execute("""
@@ -357,7 +368,7 @@ class AddEventModal(discord.ui.Modal, title="➕ Nowe wydarzenie"):
                     interaction.guild_id,
                     self.channel_id,
                     name,
-                    self.description.value.strip() or None,
+                    desc,
                     next_run,
                     repeat_type,
                     rem_min,
@@ -369,6 +380,11 @@ class AddEventModal(discord.ui.Modal, title="➕ Nowe wydarzenie"):
         weekday_name = DAY_NAMES[next_run.weekday()]
         repeat_label = format_repeat_type(repeat_type)
 
+        try:
+            await interaction.message.delete()
+        except:
+            pass
+
         await interaction.response.send_message(
             f"✅ **{name}** dodane!\n"
             f"⏰ Pierwsze: {weekday_name} {next_run.strftime('%d.%m.%Y %H:%M')}\n"
@@ -376,6 +392,65 @@ class AddEventModal(discord.ui.Modal, title="➕ Nowe wydarzenie"):
             ephemeral=True
         )
         await update_panel(interaction.guild_id)
+
+
+class Step1Modal(discord.ui.Modal):
+    def __init__(self, day_str: str, channel_id: int):
+        super().__init__(title=f"Krok 1: Szczegóły ({day_str.capitalize()})")
+        self.day_str = day_str
+        self.channel_id = channel_id
+
+        # 1. Nazwa
+        self.event_name = discord.ui.TextInput(
+            label="Nazwa wydarzenia",
+            placeholder="np. Boss Ogień",
+            max_length=50
+        )
+        self.add_item(self.event_name)
+
+        # 2. Opis
+        self.event_desc = discord.ui.TextInput(
+            label="Opis (opcjonalnie)",
+            placeholder="Krótki opis wydarzenia...",
+            required=False,
+            style=discord.TextStyle.paragraph,
+            max_length=200
+        )
+        self.add_item(self.event_desc)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name_val = self.event_name.value
+        desc_val = self.event_desc.value
+
+        # Otwieramy drugi modal, przekazując mu zgromadzone dane
+        next_modal = Step2Modal(self.day_str, name_val, desc_val, self.channel_id)
+        await interaction.response.send_modal(next_modal)
+
+
+class DaySelect(discord.ui.Select):
+    def __init__(self, channel_id: int):
+        self.channel_id = channel_id
+        options = [
+            discord.SelectOption(label="Dzisiaj / Najbliższy", value="*"),
+            discord.SelectOption(label="Poniedziałek", value="poniedzialek"),
+            discord.SelectOption(label="Wtorek", value="wtorek"),
+            discord.SelectOption(label="Środa", value="sroda"),
+            discord.SelectOption(label="Czwartek", value="czwartek"),
+            discord.SelectOption(label="Piątek", value="piatek"),
+            discord.SelectOption(label="Sobota", value="sobota"),
+            discord.SelectOption(label="Niedziela", value="niedziela"),
+        ]
+        super().__init__(placeholder="Wybierz dzień tygodnia...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        # Kiedy użytkownik wybierze dzień, otwiera się pierwszy modal
+        day_str = self.values[0]
+        await interaction.response.send_modal(Step1Modal(day_str, self.channel_id))
+
+class DaySelectView(discord.ui.View):
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=120)
+        self.add_item(DaySelect(channel_id))
 
 
 class SubscribeSelect(discord.ui.Select):
@@ -452,8 +527,12 @@ class PanelView(discord.ui.View):
             panel = await conn.fetchrow("SELECT channel_id FROM panel_messages WHERE guild_id=$1", interaction.guild_id)
         channel_id = panel["channel_id"] if panel else interaction.channel_id
         
-        # Otwieramy bezpośrednio JEDEN modal
-        await interaction.response.send_modal(AddEventModal(channel_id))
+        # Wysyłamy Select do wyboru dnia
+        await interaction.response.send_message(
+            "Rozpocznij tworzenie wydarzenia:",
+            view=DaySelectView(channel_id),
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Usuń wydarzenie", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="panel_delete")
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
