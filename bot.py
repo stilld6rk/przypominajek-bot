@@ -142,10 +142,13 @@ def format_countdown(dt: datetime) -> str:
 async def build_panel_embed(guild_id: int) -> discord.Embed:
     async with db.acquire() as conn:
         events = await conn.fetch("""
-            SELECT e.*, COUNT(s.user_id) AS sub_count
+            SELECT e.id, e.guild_id, e.channel_id, e.name, e.description,
+                   e.next_run, e.repeat_type, e.remind_min, e.created_by,
+                   e.created_at, e.reminded, COUNT(s.user_id) AS sub_count
             FROM events e
             LEFT JOIN subscriptions s ON s.event_id = e.id
             WHERE e.guild_id = $1
+            GROUP BY e.id
             ORDER BY e.next_run ASC
         """, guild_id)
 
