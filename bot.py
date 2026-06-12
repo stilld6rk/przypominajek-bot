@@ -23,21 +23,16 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 db: asyncpg.Pool = None
 
+# Zostawione dla kompatybilności ze starymi wpisami w bazie danych
 REPEAT_OPTIONS = {
     "co_godzine":    "Co godzinę",
+    "co_dwie_godziny": "Co dwie godziny",
+    "co_sześć_godzin": "Co sześć godzin",
     "co_dzien":      "Co dzień",
     "co_tydzien":    "Co tydzień",
     "co_2_tygodnie": "Co 2 tygodnie",
     "co_miesiac":    "Co miesiąc",
     "jednorazowe":   "Jednorazowe",
-}
-
-REMIND_OPTIONS = {
-    15:   "15 minut przed",
-    30:   "30 minut przed",
-    60:   "1 godzinę przed",
-    120:  "2 godziny przed",
-    1440: "1 dzień przed",
 }
 
 DAYS_PL = {
@@ -66,7 +61,7 @@ async def init_db():
                 name         TEXT NOT NULL,
                 description  TEXT,
                 next_run     TIMESTAMPTZ NOT NULL,
-                repeat_type  TEXT NOT NULL DEFAULT 'co_tydzien',
+                repeat_type  TEXT NOT NULL DEFAULT 'custom_0',
                 remind_min   INT NOT NULL DEFAULT 30,
                 created_by   BIGINT NOT NULL DEFAULT 0,
                 created_at   TIMESTAMPTZ DEFAULT NOW(),
@@ -84,12 +79,10 @@ async def init_db():
                 message_id  BIGINT NOT NULL
             );
         """)
-        # Migracje dla starych tabel
         migrations = [
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS reminded BOOLEAN DEFAULT FALSE",
-            "ALTER TABLE events ADD COLUMN IF NOT EXISTS repeat_type TEXT NOT NULL DEFAULT 'co_tydzien'",
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS repeat_type TEXT NOT NULL DEFAULT 'custom_0'",
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS description TEXT",
-            # Usuń stary NOT NULL z cron jeśli istnieje
             "ALTER TABLE events DROP COLUMN IF EXISTS cron",
         ]
         for m in migrations:
@@ -102,10 +95,25 @@ async def init_db():
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def next_run_after(dt: datetime, repeat_type: str) -> datetime | None:
-    if repeat_type == "jednorazowe":
+    if repeat_type == "jednorazowe" or repeat_type == "custom_0":
         return None
-    elif repeat_type == "co_godzine":
+    
+    # Nowy system (custom_X gdzie X to minuty)
+    if repeat_type.startswith("custom_"):
+        try:
+            mins = int(repeat_type.split("_")[1])
+            if mins <= 0: return None
+            return dt + timedelta(minutes=mins)
+        except:
+            return None
+
+    # Stary system (legacy) dla kompatybilności wstecznej
+    if repeat_type == "co_godzine":
         return dt + timedelta(hours=1)
+    elif repeat_type == "co_dwie_godziny":
+        return dt + timedelta(hours=2)
+    elif repeat_type == "co_sześć_godzin":
+        return dt + timedelta(hours=6)
     elif repeat_type == "co_dzien":
         return dt + timedelta(days=1)
     elif repeat_type == "co_tydzien":
@@ -122,6 +130,22 @@ def next_run_after(dt: datetime, repeat_type: str) -> datetime | None:
             return dt.replace(year=year, month=month, day=28)
     return None
 
+def format_repeat_type(rt: str) -> str:
+    if rt == "custom_0":
+        return "Jednorazowe"
+    if rt.startswith("custom_"):
+        try:
+            mins = int(rt.split("_")[1])
+            d, rem = divmod(mins, 1440)
+            h, m = divmod(rem, 60)
+            parts = []
+            if d > 0: parts.append(f"{d}d")
+            if h > 0: parts.append(f"{h}h")
+            if m > 0: parts.append(f"{m}m")
+            return "Co " + " ".join(parts)
+        except:
+            return rt
+    return REPEAT_OPTIONS.get(rt, rt)
 
 def format_countdown(dt: datetime) -> str:
     now = datetime.now(TZ)
@@ -140,12 +164,7 @@ def format_countdown(dt: datetime) -> str:
         parts.append(f"{minutes}min")
     return "za " + " ".join(parts)
 
-
-def parse_next_run(day_str: str, hour_str: str, minute_str: str) -> tuple[datetime | None, str | None]:
-    """
-    Parsuje dzień tygodnia / godzinę / minutę i zwraca (next_run, error).
-    Dzień może być: nazwą (poniedzialek, pon), numerem 1-7, lub * (dzisiaj/najbliższy).
-    """
+def parse_next_run(day_str: str, hour_str: str, minute_str: str, repeat_type: str) -> tuple[datetime | None, str | None]:
     try:
         hour = int(hour_str.strip())
         minute = int(minute_str.strip())
@@ -160,23 +179,32 @@ def parse_next_run(day_str: str, hour_str: str, minute_str: str) -> tuple[dateti
     day_str = day_str.strip().lower().replace("ą", "a").replace("ó", "o").replace("ź", "z").replace("ę", "e")
 
     if day_str == "*":
-        # Najbliższe wystąpienie danej godziny (dziś lub jutro)
         candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if candidate <= now:
-            candidate += timedelta(days=1)
-        return candidate, None
     else:
         target_weekday = DAYS_PL.get(day_str)
         if target_weekday is None:
-            return None, f"Nie rozpoznano dnia '{day_str}'. Użyj np: poniedzialek, wtorek, sroda, czwartek, piatek, sobota, niedziela lub * dla najbliższego."
-        # Znajdź najbliższy taki dzień tygodnia
+            return None, f"Nie rozpoznano dnia '{day_str}'. Użyj np: poniedzialek, wtorek... lub *."
+        
         current_weekday = now.weekday()
         days_ahead = (target_weekday - current_weekday) % 7
         candidate = (now + timedelta(days=days_ahead)).replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if candidate <= now:
-            candidate += timedelta(weeks=1)
-        return candidate, None
 
+    if candidate <= now:
+        if repeat_type == "jednorazowe" or repeat_type == "custom_0":
+            return None, f"Wybrany czas ({candidate.strftime('%H:%M')}) już minął, a wydarzenie jest jednorazowe."
+        
+        loop_safety = 0
+        while candidate <= now:
+            next_cand = next_run_after(candidate, repeat_type)
+            if next_cand is None or next_cand == candidate:
+                return None, "Błąd kalkulacji interwału. Upewnij się, że czas powtarzania jest większy niż 0."
+            
+            candidate = next_cand
+            loop_safety += 1
+            if loop_safety > 1000:
+                return None, "Zbyt krótki interwał lub błąd pętli."
+
+    return candidate, None
 
 async def build_panel_embed(guild_id: int) -> discord.Embed:
     async with db.acquire() as conn:
@@ -205,8 +233,8 @@ async def build_panel_embed(guild_id: int) -> discord.Embed:
     for e in events:
         next_run = e["next_run"].astimezone(TZ)
         countdown = format_countdown(e["next_run"])
-        repeat_label = REPEAT_OPTIONS.get(e["repeat_type"], e["repeat_type"])
-        remind_label = REMIND_OPTIONS.get(e["remind_min"], f"{e['remind_min']} min przed")
+        repeat_label = format_repeat_type(e["repeat_type"])
+        remind_label = f"{e['remind_min']} min przed"
         weekday_name = DAY_NAMES[next_run.weekday()]
 
         value = (
@@ -220,7 +248,6 @@ async def build_panel_embed(guild_id: int) -> discord.Embed:
         embed.add_field(name=f"🎯 {e['name']}", value=value, inline=False)
 
     return embed
-
 
 async def update_panel(guild_id: int):
     async with db.acquire() as conn:
@@ -245,8 +272,23 @@ async def update_panel(guild_id: int):
 class AddEventModal(discord.ui.Modal, title="➕ Nowe wydarzenie"):
     event_name = discord.ui.TextInput(
         label="Nazwa wydarzenia",
-        placeholder="np. Boss Ogień, Poker Night",
+        placeholder="np. Boss Ogień",
         max_length=50
+    )
+    start_time = discord.ui.TextInput(
+        label="Kiedy start? (Dzień Godzina:Minuta)",
+        placeholder="np. piatek 20:00 lub * 15:30",
+        max_length=25
+    )
+    interval = discord.ui.TextInput(
+        label="Interwał: Dni Godziny Minuty (oddziel spacją)",
+        placeholder="np. 0 1 30 (co 1.5h) lub 0 0 0 (raz)",
+        max_length=20
+    )
+    remind_min = discord.ui.TextInput(
+        label="Ile minut przed przypomnieć?",
+        placeholder="np. 15",
+        max_length=5
     )
     description = discord.ui.TextInput(
         label="Opis (opcjonalnie)",
@@ -254,37 +296,55 @@ class AddEventModal(discord.ui.Modal, title="➕ Nowe wydarzenie"):
         required=False,
         max_length=200
     )
-    day_input = discord.ui.TextInput(
-        label="Dzień tygodnia (lub * = najbliższy)",
-        placeholder="poniedzialek / wtorek / piatek / sobota / *",
-        max_length=20
-    )
-    hour_input = discord.ui.TextInput(
-        label="Godzina (0–23)",
-        placeholder="np. 20",
-        max_length=2
-    )
-    minute_input = discord.ui.TextInput(
-        label="Minuta (0–59)",
-        placeholder="np. 0",
-        max_length=2
-    )
 
-    def __init__(self, repeat_type: str, remind_min: int, channel_id: int):
+    def __init__(self, channel_id: int):
         super().__init__()
-        self.repeat_type = repeat_type
-        self.remind_min = remind_min
         self.channel_id = channel_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        next_run, error = parse_next_run(
-            self.day_input.value,
-            self.hour_input.value,
-            self.minute_input.value
-        )
+        # 1. Parsowanie Czasu Startu
+        start_parts = self.start_time.value.strip().split()
+        if len(start_parts) != 2:
+            return await interaction.response.send_message("❌ Zły format czasu startu! Użyj np. `piatek 20:00`", ephemeral=True)
+        
+        day_str = start_parts[0]
+        time_parts = start_parts[1].split(':')
+        if len(time_parts) != 2:
+            return await interaction.response.send_message("❌ Zły format godziny! Użyj np. `20:00` (pamiętaj o dwukropku)", ephemeral=True)
+            
+        hour_str, minute_str = time_parts[0], time_parts[1]
+
+        # 2. Parsowanie Interwału
+        int_parts = self.interval.value.strip().split()
+        if len(int_parts) == 1 and int_parts[0] == "0":
+            d, h, m = 0, 0, 0
+        elif len(int_parts) == 3:
+            try:
+                d = int(int_parts[0])
+                h = int(int_parts[1])
+                m = int(int_parts[2])
+            except ValueError:
+                return await interaction.response.send_message("❌ Interwał musi składać się z liczb.", ephemeral=True)
+        else:
+            return await interaction.response.send_message("❌ Podaj dokładnie 3 liczby dla interwału (Dni Godziny Minuty) oddzielone spacją, np. `0 1 30`", ephemeral=True)
+
+        if d < 0 or h < 0 or m < 0:
+            return await interaction.response.send_message("❌ Interwał nie może być ujemny.", ephemeral=True)
+
+        total_interval_mins = d * 1440 + h * 60 + m
+        repeat_type = f"custom_{total_interval_mins}"
+
+        # 3. Parsowanie Minut Przypomnienia
+        try:
+            rem_min = int(self.remind_min.value.strip())
+            if rem_min < 0: raise ValueError
+        except ValueError:
+             return await interaction.response.send_message("❌ Przypomnienie musi być dodatnią liczbą minut.", ephemeral=True)
+
+        # 4. Kalkulacja czasu
+        next_run, error = parse_next_run(day_str, hour_str, minute_str, repeat_type)
         if error:
-            await interaction.response.send_message(f"❌ {error}", ephemeral=True)
-            return
+            return await interaction.response.send_message(f"❌ {error}", ephemeral=True)
 
         name = self.event_name.value.strip()
         try:
@@ -299,62 +359,23 @@ class AddEventModal(discord.ui.Modal, title="➕ Nowe wydarzenie"):
                     name,
                     self.description.value.strip() or None,
                     next_run,
-                    self.repeat_type,
-                    self.remind_min,
+                    repeat_type,
+                    rem_min,
                     interaction.user.id,
                 )
         except asyncpg.UniqueViolationError:
-            await interaction.response.send_message(f"❌ Wydarzenie **{name}** już istnieje!", ephemeral=True)
-            return
+            return await interaction.response.send_message(f"❌ Wydarzenie **{name}** już istnieje!", ephemeral=True)
 
         weekday_name = DAY_NAMES[next_run.weekday()]
-        repeat_label = REPEAT_OPTIONS[self.repeat_type]
-        remind_label = REMIND_OPTIONS.get(self.remind_min, f"{self.remind_min} min")
+        repeat_label = format_repeat_type(repeat_type)
 
         await interaction.response.send_message(
             f"✅ **{name}** dodane!\n"
-            f"⏰ Pierwsze wystąpienie: {weekday_name} {next_run.strftime('%d.%m.%Y %H:%M')}\n"
-            f"🔁 {repeat_label} · 🔔 {remind_label} przed",
+            f"⏰ Pierwsze: {weekday_name} {next_run.strftime('%d.%m.%Y %H:%M')}\n"
+            f"🔁 {repeat_label} · 🔔 {rem_min} min przed",
             ephemeral=True
         )
         await update_panel(interaction.guild_id)
-
-
-class RepeatSelect(discord.ui.Select):
-    def __init__(self, channel_id: int):
-        self.channel_id = channel_id
-        options = [discord.SelectOption(label=label, value=value) for value, label in REPEAT_OPTIONS.items()]
-        super().__init__(placeholder="🔁 Jak często się powtarza?", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.repeat_type = self.values[0]
-        await interaction.response.edit_message(
-            content=f"✅ Powtarzanie: **{REPEAT_OPTIONS[self.values[0]]}**\nTeraz wybierz kiedy przypomnieć:",
-            view=RemindSelectView(self.values[0], self.channel_id)
-        )
-
-class RepeatSelectView(discord.ui.View):
-    def __init__(self, channel_id: int):
-        super().__init__(timeout=120)
-        self.repeat_type = None
-        self.add_item(RepeatSelect(channel_id))
-
-class RemindSelect(discord.ui.Select):
-    def __init__(self, repeat_type: str, channel_id: int):
-        self.repeat_type = repeat_type
-        self.channel_id = channel_id
-        options = [discord.SelectOption(label=label, value=str(value)) for value, label in REMIND_OPTIONS.items()]
-        super().__init__(placeholder="🔔 Kiedy przypomnienie?", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        remind_min = int(self.values[0])
-        modal = AddEventModal(self.repeat_type, remind_min, self.channel_id)
-        await interaction.response.send_modal(modal)
-
-class RemindSelectView(discord.ui.View):
-    def __init__(self, repeat_type: str, channel_id: int):
-        super().__init__(timeout=120)
-        self.add_item(RemindSelect(repeat_type, channel_id))
 
 
 class SubscribeSelect(discord.ui.Select):
@@ -385,7 +406,6 @@ class SubscribeView(discord.ui.View):
         super().__init__(timeout=60)
         self.add_item(SubscribeSelect(events))
 
-
 class DeleteSelect(discord.ui.Select):
     def __init__(self, events: list):
         options = [discord.SelectOption(label=e["name"], value=str(e["id"])) for e in events[:25]]
@@ -409,7 +429,6 @@ class DeleteSelectView(discord.ui.View):
         super().__init__(timeout=60)
         self.add_item(DeleteSelect(events))
 
-
 class PanelView(discord.ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=None)
@@ -432,11 +451,9 @@ class PanelView(discord.ui.View):
         async with db.acquire() as conn:
             panel = await conn.fetchrow("SELECT channel_id FROM panel_messages WHERE guild_id=$1", interaction.guild_id)
         channel_id = panel["channel_id"] if panel else interaction.channel_id
-        await interaction.response.send_message(
-            "Wybierz jak często wydarzenie ma się powtarzać:",
-            view=RepeatSelectView(channel_id),
-            ephemeral=True
-        )
+        
+        # Otwieramy bezpośrednio JEDEN modal
+        await interaction.response.send_modal(AddEventModal(channel_id))
 
     @discord.ui.button(label="Usuń wydarzenie", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="panel_delete")
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -480,14 +497,12 @@ async def check_events():
         for guild_id in guild_ids:
             await update_panel(guild_id)
 
-
 @tasks.loop(minutes=5)
 async def refresh_panels():
     async with db.acquire() as conn:
         panels = await conn.fetch("SELECT guild_id FROM panel_messages")
     for row in panels:
         await update_panel(row["guild_id"])
-
 
 async def send_notification(event, reminder: bool):
     channel = bot.get_channel(event["channel_id"])
