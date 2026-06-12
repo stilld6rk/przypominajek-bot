@@ -575,7 +575,7 @@ async def send_notification(event, reminder: bool):
         )
         embed.set_footer(text="Wydarzenie właśnie się zaczyna!")
 
-    await channel.send(content=mentions or None, embed=embed)
+    await channel.send(content=mentions or None, embed=embed, delete_after=300)
 
 # ─── Slash commands ──────────────────────────────────────────────────────────
 
