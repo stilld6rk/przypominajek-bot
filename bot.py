@@ -230,23 +230,23 @@ async def build_panel_embed(guild_id: int) -> discord.Embed:
         embed.description = "Brak wydarzeń. Kliknij **➕ Dodaj wydarzenie** żeby dodać pierwsze!"
         return embed
 
-    for e in events:
+    lines = []
+    for i, e in enumerate(events):
         next_run = e["next_run"].astimezone(TZ)
         countdown = format_countdown(e["next_run"])
         repeat_label = format_repeat_type(e["repeat_type"])
-        remind_label = f"{e['remind_min']} min przed"
         weekday_name = DAY_NAMES[next_run.weekday()]
 
-        value = (
-            f"⏰ **{countdown}** ({weekday_name}, {next_run.strftime('%H:%M')})\n"
-            f"🔁 {repeat_label} · 🔔 {remind_label}\n"
-            f"👥 {e['sub_count']} subskrybentów"
-        )
+        if i > 0:
+            lines.append("─" * 28)
+
+        lines.append(f"🎯 **{e['name']}**")
+        lines.append(f"⏰ **{countdown}** · {weekday_name}, {next_run.strftime('%H:%M')}")
+        lines.append(f"🔁 {repeat_label}  ·  🔔 {e['remind_min']} min przed  ·  👥 {e['sub_count']} os.")
         if e["description"]:
-            value += f"\n📝 {e['description']}"
+            lines.append(f"📝 *{e['description']}*")
 
-        embed.add_field(name=f"🎯 {e['name']}", value=value, inline=False)
-
+    embed.description = "\n".join(lines)
     return embed
 
 async def update_panel(guild_id: int):
