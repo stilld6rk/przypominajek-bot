@@ -472,6 +472,138 @@ class DeleteSelectView(discord.ui.View):
         super().__init__(timeout=60)
         self.add_item(DeleteSelect(events))
 
+
+class EditModal(discord.ui.Modal):
+    def __init__(self, event: dict):
+        super().__init__(title=f"Edytuj: {event['name'][:40]}")
+        self.event_id = event["id"]
+        self.guild_id = event["guild_id"]
+
+        rt = event["repeat_type"]
+        if rt.startswith("custom_"):
+            try:
+                mins = int(rt.split("_")[1])
+                ih, im = divmod(mins, 60)
+                interval_default = f"{ih:02d}:{im:02d}"
+            except Exception:
+                interval_default = "00:00"
+        else:
+            interval_default = "00:00"
+
+        next_run_local = event["next_run"].astimezone(TZ)
+
+        self.event_name = discord.ui.TextInput(
+            label="Nazwa wydarzenia",
+            default=event["name"],
+            max_length=50
+        )
+        self.add_item(self.event_name)
+
+        self.event_desc = discord.ui.TextInput(
+            label="Opis (opcjonalnie)",
+            default=event["description"] or "",
+            required=False,
+            style=discord.TextStyle.paragraph,
+            max_length=200
+        )
+        self.add_item(self.event_desc)
+
+        self.time_input = discord.ui.TextInput(
+            label="Godzina startu (GG:MM)",
+            default=next_run_local.strftime("%H:%M"),
+            max_length=5
+        )
+        self.add_item(self.time_input)
+
+        self.interval_input = discord.ui.TextInput(
+            label="Interwał (GG:MM), 00:00 = jednorazowe",
+            default=interval_default,
+            max_length=6
+        )
+        self.add_item(self.interval_input)
+
+        self.remind_min = discord.ui.TextInput(
+            label="Przypomnienie (minut przed)",
+            default=str(event["remind_min"]),
+            max_length=5
+        )
+        self.add_item(self.remind_min)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        time_parts = self.time_input.value.strip().split(":")
+        if len(time_parts) != 2:
+            return await interaction.response.send_message("❌ Zły format godziny! Użyj `GG:MM`.", ephemeral=True)
+
+        int_parts = self.interval_input.value.strip().split(":")
+        if len(int_parts) != 2:
+            return await interaction.response.send_message("❌ Zły format interwału! Użyj `GG:MM`.", ephemeral=True)
+
+        try:
+            h, m = int(int_parts[0]), int(int_parts[1])
+            if h < 0 or m < 0:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message("❌ Interwał musi być dodatnią liczbą.", ephemeral=True)
+
+        try:
+            rem_min = int(self.remind_min.value.strip())
+            if rem_min < 0:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message("❌ Przypomnienie musi być dodatnią liczbą minut.", ephemeral=True)
+
+        total_interval_mins = h * 60 + m
+        repeat_type = f"custom_{total_interval_mins}"
+
+        next_run, error = parse_next_run("*", time_parts[0], time_parts[1], repeat_type)
+        if error:
+            return await interaction.response.send_message(f"❌ {error}", ephemeral=True)
+
+        name = self.event_name.value.strip()
+        desc = self.event_desc.value.strip() or None
+
+        async with db.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT id FROM events WHERE guild_id=$1 AND name=$2 AND id != $3",
+                self.guild_id, name, self.event_id
+            )
+            if existing:
+                return await interaction.response.send_message(f"❌ Wydarzenie o nazwie **{name}** już istnieje!", ephemeral=True)
+
+            await conn.execute("""
+                UPDATE events
+                SET name=$1, description=$2, next_run=$3, repeat_type=$4, remind_min=$5, reminded=FALSE
+                WHERE id=$6 AND guild_id=$7
+            """, name, desc, next_run, repeat_type, rem_min, self.event_id, self.guild_id)
+
+        repeat_label = format_repeat_type(repeat_type)
+        weekday_name = DAY_NAMES[next_run.weekday()]
+        await interaction.response.send_message(
+            f"✅ **{name}** zaktualizowane!\n"
+            f"⏰ Następne: {weekday_name} {next_run.strftime('%d.%m.%Y %H:%M')}\n"
+            f"🔁 {repeat_label} · 🔔 {rem_min} min przed\n"
+            f"👥 Subskrybenci pozostają bez zmian.",
+            ephemeral=True
+        )
+        await update_panel(self.guild_id)
+
+
+class EditSelect(discord.ui.Select):
+    def __init__(self, events: list):
+        self.event_map = {str(e["id"]): e for e in events}
+        options = [discord.SelectOption(label=e["name"], value=str(e["id"])) for e in events[:25]]
+        super().__init__(placeholder="Wybierz wydarzenie do edycji...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        event = self.event_map[self.values[0]]
+        await interaction.response.send_modal(EditModal(event))
+
+class EditSelectView(discord.ui.View):
+    def __init__(self, events: list):
+        super().__init__(timeout=60)
+        self.add_item(EditSelect(events))
+
+
 class PanelView(discord.ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=None)
@@ -501,6 +633,21 @@ class PanelView(discord.ui.View):
             view=DaySelectView(channel_id),
             ephemeral=True
         )
+
+    @discord.ui.button(label="Edytuj wydarzenie", style=discord.ButtonStyle.secondary, emoji="✏️", custom_id="panel_edit")
+    async def edit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_events:
+            await interaction.response.send_message("❌ Potrzebujesz uprawnienia `Zarządzaj wydarzeniami`.", ephemeral=True)
+            return
+        async with db.acquire() as conn:
+            events = await conn.fetch(
+                "SELECT id, guild_id, name, description, next_run, repeat_type, remind_min FROM events WHERE guild_id=$1 ORDER BY next_run ASC",
+                interaction.guild_id
+            )
+        if not events:
+            await interaction.response.send_message("Brak wydarzeń.", ephemeral=True)
+            return
+        await interaction.response.send_message("Wybierz wydarzenie do edycji:", view=EditSelectView(list(events)), ephemeral=True)
 
     @discord.ui.button(label="Usuń wydarzenie", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="panel_delete")
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
